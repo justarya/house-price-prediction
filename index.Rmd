@@ -1,0 +1,266 @@
+---
+title: "House price predictor"
+author: "Arya"
+date: "8/02/2020"
+output:
+  html_document:
+    theme: flatly
+    highlight: haddock
+    toc: true
+    toc_depth: 3
+    toc_float: 
+      collapsed: no
+    number_sections: true
+---
+
+```{r}
+library(forecast)
+library(dplyr)
+library(MLmetrics)
+library(tseries)
+library(quantmod)
+library(lubridate)
+```
+
+# Data preparation
+
+Pada LBB kali ini, kita akan melakukan forecasting berapa harga rumah. Data yang digunakan adalah data dari 2007 Q3 berdasarkan quarter.
+
+```{r}
+hp <- read.csv("houseprice.csv")
+```
+
+Jika dilihat data `houseprice` yang baru di import, data houseprice terdiri dari beberapa column:
+
+```{r}
+glimpse(hp)
+```
+- saledate : Quarter tahunan
+- MA       : _Moving Average_ median harga rumah
+- type     : Tipe rumah (`Unit`, `House`)
+- bedrooms : Jumlah ruang tidur
+
+```{r}
+hp %>% head()
+```
+
+# Data Preprocesing
+
+## Data cleaning
+Dari data yang telah diimport terdapat macam tipe rumah dan jumlah bedroom. Tetapi untuk predicting kali ini kita akan berfokus kepada jenis _House_ dan jumlah kamar 2.
+
+```{r}
+hp.house <- hp %>%
+  filter(bedrooms == 2, type == "house") %>% 
+  mutate(saledate=dmy(saledate)) %>% 
+  arrange(saledate)
+```
+
+
+## Convert to Timeseries
+
+Sebelum membuat model, alangkah baiknya data diubah menjadi object `TimeSeries`. Dalam object timeseries ini akan digunakan `MA` atau _Moving Average_ untuk memprediksi harga rumah saham.
+
+```{r}
+hp.ts <- ts(
+  hp.house$MA,
+  start=c(2007,3),
+  frequency=4
+)
+
+hp.ts %>% autoplot()
+```
+
+## Decompose data time series
+
+`Decompose` terdiri dari beberapa komponen, yaitu Error, Trend, Seasonal.
+- Trend merupakan pergerakan rata rata (_Moving Average_) secara global 
+- Seasonal adalah pola data per frequency
+- Error adalah nilai yang tidak dapat oleh Trend dan Seasonal
+
+```{r}
+hp.ts %>% decompose() %>% autoplot()
+```
+Jika dilihat dari data compose diatas, trend Harga rumah bisa dibilang naik, walaupun sempat turun ditahun 2008 dan 2012.
+
+## Cross Validation
+
+Salah satu hal yang tidak kalah penting yang harus dilakukan sebelum melalukan modeling adalah Cross Validation. Dimana data akan dipisah menjadi data test dan data train. Hal ini penting karena pemisahan data berfungsi untuk memvalidasi data kita akurat atau tidak saat memprediksi data yang belum pernah dilihat.
+
+```{r}
+hp.test.length <- 4
+hp.test <- tail(hp.ts, hp.test.length)
+hp.train <- head(hp.ts, length(hp.ts)-length(hp.test))
+```
+
+
+# Modeling
+
+Selanjutnya adalah tahap pembuatan model.
+
+## Simple Exponential Smoothing
+
+`Simple Exponentiak Snoothing` merupakan metode forecasting yang digunakan untuk membuat model smoothing exponential smoothing. Tanpa mengandung trend dan seasonal.
+
+```{r}
+hp.ses <- ets(
+  hp.train,
+  model="ANN"
+)
+```
+
+## Double Exponential Smoothing (Holt)
+
+`Double Exponential Smoothing (Holt)` merupakan metode forecasting yang digunakan untuk membuat model smoothing exponential smoothing. Tanpa mengandung seasonal.
+
+```{r}
+hp.holt <- ets(
+  hp.train,
+  model="AAN"
+)
+```
+
+## Triple Exponential Smoothing (HoltWinters)
+
+`Triple Exponential Smoothing (HoltWinters)` merupakan metode forecasting yang dikembakan dari metode Holt tetapi mengandung seasonal.
+
+```{r}
+hp.hw <- ets(
+  hp.train,
+  model="AAA"
+)
+```
+
+## ARIMA
+
+Arima adalah salah satu model forecast yang sering dipakai, salah satu syarat ARIMA adalah data stationer atau mengacak, data yang bergerak disekitar mean atau tidak mempunyai tren dan seasonal.
+
+Model ARIMA :
+
+AR(p) = nilai p menunjukkan berapa banyak data variable y sebelumnya yang digunakan oleh AutoRegressive
+
+I(d) = nilai d menunjukkan berapa kali data dilakukan differencing hingga stationer
+
+MA(q) = nilai q menunjukkan berapa banyak error yang dilakukan smoothing
+
+
+### Cek data stationer
+
+Pertama, marilah cek data apakah _stationer_ atau bukan.
+
+```{r}
+adf.test(hp.train)
+```
+Dari hasil cek stasioner, menyatakan bahwa data `HouseTrain` merupakan data _Stationer_ karena memiliki p-value > 0.05. Sehingga perlu dilakukan `diff` dengan data kita agar tidak stasioner lagi.
+
+```{r}
+adf.test(diff(hp.train, differences = 2))
+```
+Pada data ini kita membutuhkan differencing sebesar 2 kali agar p-value kurang dari 0.05.
+
+### Cek PACF & ACF
+
+```{r}
+diff(hp.train, differences = 2) %>% 
+  tsdisplay()
+```
+Dari hasil plotting ACF, PACF dan differencing, kita mendapatkan nilai untuk tunning model ARIMA.
+AR(p): 2
+I(d): 2
+MA(q): 2
+
+### Tunning model
+Untuk model Tunning model, kita akan membuat 3 model.
+
+**1. AR=2, I=2, MA=2**
+```{r}
+# 2 2 2
+hp.arima.222 <- Arima(hp.train, order=c(2,2,2))
+```
+
+**2. AR=2, I=2, MA=1**
+```{r}
+# 2 2 1
+hp.arima.221 <- Arima(hp.train, order=c(2,2,1))
+```
+
+**3. AR=1, I=2, MA=1**
+```{r}
+# 1 2 1
+hp.arima.121 <- Arima(hp.train, order=c(1,2,1))
+```
+
+### Auto Arima
+Jika tadi doatas menggunakan membuat model dengan cara tunning. Kali ini model akan dibuat dengan cara otomatis menggunakan `auto.arima()` 
+```{r}
+hp.arima.auto <- auto.arima(hp.train)
+```
+
+### Error
+
+```{r}
+accuracy(hp.ses)
+accuracy(hp.holt)
+accuracy(hp.hw)
+accuracy(hp.arima.222)
+accuracy(hp.arima.221)
+accuracy(hp.arima.121)
+accuracy(hp.arima.auto)
+```
+
+# Forecasting
+
+Setelah modeling, selanjutnya adalah forecasting. Model yang akan digunakan adalah model Auto Arima karena memiliki error paling kecil atau `MAPE` sebebesar 0.63
+
+```{r}
+hp.arima.forecast <- forecast(hp.arima.auto, h=hp.test.length)
+
+hp.ts %>% autoplot() +
+  autolayer(hp.arima.forecast, series = "ARIMA Prediction") +
+  autolayer(hp.test, series = "Ground Truth")
+```
+
+Dari hasil forecasting diatas, bisa dilihat data model ARIMA dapat memprediksi harga lumayan akurat walaupun sempat salah prediksi yang lumayan besar di tahun 2019. 
+
+# Evaluation
+
+## Error
+
+```{r}
+accuracy(hp.arima.forecast, hp.test)
+```
+
+Dapat dilihat dari hasil validasi error, `MAPE` di data training mendapatkan 0.29 sedangkan di data test mendapatkan 0.99. Yang artinya terdapat overfitting di data kita.
+
+## Assumption check
+
+Ada beberapa asumsi yang akan digunakan untuk mengecek model, yaitu **No-autocorrelation residual** dan 
+cek **Normal Distribution**.
+
+### No-autocorrelation residual
+H0 : residual has no-autocorrelation H1: residual has autocorrelation
+yang diinginkan p-value > 0.05 (alpha), no-autocorrelation
+
+```{r}
+Box.test(x = hp.arima.forecast$residuals, type = "Ljung-Box")
+```
+
+Untuk cek asumsi no-autocorrelation residual, mendapatkan `p-value` sebesar 0.66 atau p-value > 0.5 yang berarti no-autocorrelation atau terima H0
+
+### Normal Distribution
+H0 : residual menyebar normal H1: residual tidak menyebar normal
+yang diinginkan p-value > 0.05 (alpha), residual menyebar normal
+
+```{r}
+hist(hp.arima.forecast$residuals, breaks = 30)
+```
+
+```{r}
+shapiro.test(x = hp.arima.forecast$residuals)
+```
+
+Dari hasil diatas, didapatkan p-value 0.0001566 atau p-value < 0.05 yang berarti residual tidak menyebar normal atau tolak H0
+
+# Conclusion
+Dari hasil evaluasi model dapat disimpulkan bahwa model Auto Arima adalah yang terbaik dan dari tes asumsi tidak memiliki autocorrelation tetapi residual tidak menyebar normal.
+
